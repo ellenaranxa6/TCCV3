@@ -1,0 +1,7 @@
+streamlit
+plotly
+pandas
+numpy
+typing_extensions
+networkx
+streamlit-plotly-events
