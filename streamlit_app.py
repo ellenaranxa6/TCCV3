@@ -9,30 +9,37 @@ import ast
 # CONFIGURAÇÃO INICIAL
 # =========================================================
 st.set_page_config(
-    page_title="Isolamento Real IEEE-123 Bus – Modo 1 & Modo 2",
+    page_title="Plataforma Interativa – Manobras IEEE 123 Bus",
     layout="wide"
 )
 
-st.title("⚡ Plataforma Interativa – Isolamento Real IEEE 123 Bus")
+st.title("⚡ Plataforma Interativa – Manobras IEEE 123 Bus")
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "ieee123_manobras.db"
 
-# Lista de chaves NF/NA (para exibição e lógica de negócio)
-NF_LIST = ["sw1", "sw2", "sw3", "sw4", "sw5", "sw6"]
-NA_LIST = ["sw7", "sw8", "l108"]
-
 
 # =========================================================
-# FUNÇÕES AUXILIARES – BANCO
+# FUNÇÕES AUXILIARES – BANCO E CARREGAMENTO
 # =========================================================
 def get_connection() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
 
 @st.cache_data(show_spinner=False)
+def listar_tabelas() -> List[str]:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    )
+    rows = [r[0] for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+@st.cache_data(show_spinner=False)
 def carregar_coords() -> Dict[str, Tuple[float, float]]:
-    """Lê tabela coords(bus, x, y) do banco."""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("SELECT bus, x, y FROM coords")
@@ -44,8 +51,7 @@ def carregar_coords() -> Dict[str, Tuple[float, float]]:
 @st.cache_data(show_spinner=False)
 def carregar_topologia():
     """
-    Lê tabela topology(line, from_bus, to_bus, is_switch, norm)
-    do banco.
+    Lê tabela topology(line, from_bus, to_bus, is_switch, norm).
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -70,10 +76,57 @@ def carregar_topologia():
 
 
 @st.cache_data(show_spinner=False)
+def carregar_loads():
+    """Tabela loads(bus, kw)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT bus, kw FROM loads")
+    rows = cur.fetchall()
+    conn.close()
+    return {str(b): float(kw) for b, kw in rows}
+
+
+@st.cache_data(show_spinner=False)
+def carregar_nf_map():
+    """
+    Tabela nf_map(nf, barras_isoladas TEXT, kw REAL, n_barras INTEGER)
+    para o MODO 1.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT nf, barras_isoladas, kw, n_barras FROM nf_map"
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    nf_dict: Dict[str, Dict] = {}
+    for nf, barras_str, kw, n in rows:
+        barras_set = set()
+        if barras_str:
+            try:
+                lista = ast.literal_eval(barras_str)
+                for b in lista:
+                    barras_set.add(str(b).strip())
+            except Exception:
+                for b in str(barras_str).replace("[", "").replace("]", "").replace('"', "").split(","):
+                    b = b.strip()
+                    if b:
+                        barras_set.add(b)
+
+        nf_dict[str(nf)] = {
+            "barras": barras_set,
+            "kw": float(kw),
+            "n_barras": int(n),
+        }
+
+    return nf_dict
+
+
+@st.cache_data(show_spinner=False)
 def carregar_vao_map():
     """
-    Lê tabela vao_map(u_bus, v_bus, nf, kw, n_barras).
-    Um registro por vão contendo a NF ótima (MODO 1).
+    Tabela vao_map(u_bus, v_bus, nf, kw, n_barras) – MODO 1.
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -98,181 +151,66 @@ def carregar_vao_map():
 
 
 @st.cache_data(show_spinner=False)
-def carregar_loads():
-    """Tabela loads(bus, kw)."""
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT bus, kw FROM loads")
-        rows = cur.fetchall()
-    except sqlite3.OperationalError:
-        rows = []
-    conn.close()
-    return {str(b): float(kw) for b, kw in rows}
-
-
-@st.cache_data(show_spinner=False)
-def carregar_nf_map():
-    """
-    Tabela nf_map(nf, barras_isoladas TEXT, kw REAL, n_barras INTEGER).
-
-    barras_isoladas está salva como uma string de lista Python,
-    ex.: '["33", "61", "18", ...]'.
-    """
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT nf, barras_isoladas, kw, n_barras FROM nf_map"
-        )
-        rows = cur.fetchall()
-    except sqlite3.OperationalError:
-        rows = []
-    conn.close()
-
-    nf_dict: Dict[str, Dict] = {}
-    for nf, barras_str, kw, n in rows:
-        barras_set = set()
-        if barras_str:
-            try:
-                lista = ast.literal_eval(barras_str)
-                for b in lista:
-                    barras_set.add(str(b).strip())
-            except Exception:
-                for b in (
-                    str(barras_str)
-                    .replace("[", "")
-                    .replace("]", "")
-                    .replace('"', "")
-                    .split(",")
-                ):
-                    b = b.strip()
-                    if b:
-                        barras_set.add(b)
-
-        nf_dict[str(nf)] = {
-            "barras": barras_set,
-            "kw": float(kw),
-            "n_barras": int(n),
-        }
-
-    return nf_dict
-
-
-@st.cache_data(show_spinner=False)
 def carregar_nf_na_nf():
     """
-    Tabela nf_na_nf:
-      id, nf1, na, nf_block,
-      buses_off, lines_off,
-      kw_off, vmin_pu, vmax_pu, max_loading,
-      n_manobras, switch_states
-    Usada no MODO 2 (duas fontes).
+    Tabela nf_na_nf(nf1, na, nf_block, buses_off, lines_off,
+                    kw_off, vmin_pu, vmax_pu, max_loading,
+                    n_manobras, switch_states) – MODO 2.
     """
     conn = get_connection()
     cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT id, nf1, na, nf_block,
-                   buses_off, lines_off,
-                   kw_off, vmin_pu, vmax_pu, max_loading,
-                   n_manobras, switch_states
-            FROM nf_na_nf
-            """
-        )
-        rows = cur.fetchall()
-    except sqlite3.OperationalError:
-        rows = []
+    cur.execute(
+        """
+        SELECT nf1, na, nf_block,
+               buses_off, lines_off,
+               kw_off, vmin_pu, vmax_pu,
+               max_loading, n_manobras,
+               switch_states
+        FROM nf_na_nf
+        """
+    )
+    rows = cur.fetchall()
     conn.close()
 
     registros = []
 
-    def norm_opt(x):
-        if x is None:
-            return None
-        xs = str(x).strip()
-        if xs.lower() in ("none", "null", ""):
-            return None
-        return xs
+    for nf1, na, nf_block, buses_str, lines_str, kw, vmin, vmax, load, nman, sw_str in rows:
+        try:
+            buses = list(ast.literal_eval(buses_str)) if buses_str else []
+        except Exception:
+            buses = []
 
-    for (
-        _id,
-        nf1,
-        na,
-        nf_block,
-        buses_str,
-        lines_str,
-        kw_off,
-        vmin_pu,
-        vmax_pu,
-        max_loading,
-        n_manobras,
-        switch_states,
-    ) in rows:
-        # parse listas
-        buses_list: List[str] = []
-        lines_list: List[str] = []
-        if buses_str:
-            try:
-                buses_list = [str(b).strip() for b in ast.literal_eval(buses_str)]
-            except Exception:
-                buses_list = [
-                    s.strip()
-                    for s in str(buses_str)
-                    .replace("[", "")
-                    .replace("]", "")
-                    .replace('"', "")
-                    .split(",")
-                    if s.strip()
-                ]
-        if lines_str:
-            try:
-                lines_list = [str(l).strip() for l in ast.literal_eval(lines_str)]
-            except Exception:
-                lines_list = [
-                    s.strip()
-                    for s in str(lines_str)
-                    .replace("[", "")
-                    .replace("]", "")
-                    .replace('"', "")
-                    .split(",")
-                    if s.strip()
-                ]
+        try:
+            lines = list(ast.literal_eval(lines_str)) if lines_str else []
+        except Exception:
+            lines = []
+
+        try:
+            states = dict(ast.literal_eval(sw_str)) if sw_str else {}
+        except Exception:
+            states = {}
 
         registros.append(
             dict(
-                id=int(_id),
                 nf1=str(nf1),
-                na=norm_opt(na),
-                nf_block=norm_opt(nf_block),
-                buses_off=set(buses_list),
-                lines_off=set(lines_list),
-                kw_off=float(kw_off),
-                vmin_pu=float(vmin_pu),
-                vmax_pu=float(vmax_pu),
-                max_loading=float(max_loading),
-                n_manobras=int(n_manobras),
-                switch_states=str(switch_states) if switch_states is not None else "",
+                na=str(na) if na else None,
+                nf_block=str(nf_block) if nf_block else None,
+                buses_off=[str(b) for b in buses],
+                lines_off=[str(l) for l in lines],
+                kw_off=float(kw),
+                vmin_pu=float(vmin),
+                vmax_pu=float(vmax),
+                max_loading=float(load),
+                n_manobras=int(nman),
+                switch_states=states,
             )
         )
 
     return registros
 
 
-def listar_tabelas() -> List[str]:
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    )
-    rows = [r[0] for r in cur.fetchall()]
-    conn.close()
-    return rows
-
-
 # =========================================================
-# FUNÇÕES – PROCESSAMENTO MODO 1
+# FUNÇÕES DE PROCESSAMENTO – MODO 1
 # =========================================================
 def identificar_vaos_blocos(lista_barras: List[str]) -> List[Tuple[str, str]]:
     """
@@ -290,45 +228,34 @@ def identificar_vaos_blocos(lista_barras: List[str]) -> List[Tuple[str, str]]:
     return vaos
 
 
-def buscar_nf_para_vao(u: str, v: str, vao_map: List[Dict]) -> Optional[Dict]:
+def buscar_nf_para_vao(
+    u: str,
+    v: str,
+    vao_map: List[Dict]
+) -> Optional[Dict]:
     """
     Procura no vao_map a NF ótima para o vão (u, v),
     considerando que o usuário pode informar em qualquer ordem.
     """
     candidatos = [
-        registro
-        for registro in vao_map
+        registro for registro in vao_map
         if (registro["u_bus"] == u and registro["v_bus"] == v)
         or (registro["u_bus"] == v and registro["v_bus"] == u)
     ]
     if not candidatos:
         return None
 
-    # menor kW depois menos barras
     candidatos.sort(key=lambda r: (r["kw"], r["n_barras"]))
     return candidatos[0]
 
 
-def obter_barras_unicas(vaos: List[Tuple[str, str]]) -> List[str]:
-    """Retorna a lista de barras únicas presentes em uma lista de vãos."""
-    s = set()
-    for u, v in vaos:
-        s.add(u)
-        s.add(v)
-    return sorted(s, key=lambda x: (x.isdigit(), int(x) if x.isdigit() else x))
-
-
-def impacto_consolidado(
-    lista_nf: List[str],
-    loads: Dict[str, float],
-    nf_map_data: Dict[str, Dict],
-) -> Tuple[float, int, List[str]]:
+def impacto_consolidado(lista_nf: List[str],
+                        loads: Dict[str, float],
+                        nf_map_data: Dict[str, Dict]) -> Tuple[float, int, List[str]]:
     """
-    Calcula o impacto consolidado de uma manobra que envolve
-    várias NFs, **sem dupla contagem** de carga:
-
+    Impacto consolidado de uma sequência de NFs (modo 1):
       - união das barras isoladas por todas as NFs;
-      - soma dos kW por barra (usando tabela loads).
+      - soma dos kW por barra.
     """
     barras_afetadas = set()
     for nf in lista_nf:
@@ -340,164 +267,111 @@ def impacto_consolidado(
     kw_total = sum(loads.get(b, 0.0) for b in barras_afetadas)
     barras_ordenadas = sorted(
         barras_afetadas,
-        key=lambda x: (x.isdigit(), int(x) if x.isdigit() else x),
+        key=lambda x: (x.isdigit(), int(x) if x.isdigit() else x)
     )
     return kw_total, len(barras_afetadas), barras_ordenadas
 
 
 # =========================================================
-# FUNÇÕES – PROCESSAMENTO MODO 2 (NF–NA–NF via BANCO)
+# FUNÇÕES DE PROCESSAMENTO – MODO 2
 # =========================================================
-def encontrar_linhas_por_barras(
-    topo: List[Dict], u: str, v: str
-) -> List[str]:
-    """
-    Retorna lista de nomes de linhas (campo 'line' em topology)
-    que ligam as barras u e v (em qualquer ordem).
-    """
-    resultado = []
-    for el in topo:
-        bu = el["from_bus"]
-        bv = el["to_bus"]
-        if (bu == u and bv == v) or (bu == v and bv == u):
-            resultado.append(el["line"])
-    return resultado
-
-
-def montar_trecho_buses_de_linhas(
-    topo: List[Dict], linhas: List[str]
+def trecho_barras_por_linhas(
+    linhas: List[str],
+    topo: List[Dict]
 ) -> Tuple[set, List[Tuple[str, str]]]:
     """
-    A partir de uma lista de nomes de linhas (ex: ["l70","l71"]),
+    Dado uma lista de linhas (ex: ["l70","l71"]),
     retorna:
-      - conjunto de barras envolvidas (trecho_buses)
-      - lista de pares (from_bus, to_bus) para plot.
+      - conjunto de barras presentes no trecho;
+      - lista de vãos (from_bus, to_bus) para plot.
     """
-    trecho_buses = set()
+    buses = set()
     vaos = []
-    topo_por_line = {el["line"]: el for el in topo}
+    topo_por_line = {el["line"].lower(): el for el in topo}
+
     for ln in linhas:
-        el = topo_por_line.get(ln)
+        key = ln.strip().lower()
+        el = topo_por_line.get(key)
         if not el:
             continue
-        u = el["from_bus"]
-        v = el["to_bus"]
-        trecho_buses.add(u)
-        trecho_buses.add(v)
+        u = str(el["from_bus"])
+        v = str(el["to_bus"])
+        buses.add(u)
+        buses.add(v)
         vaos.append((u, v))
-    return trecho_buses, vaos
+
+    return buses, vaos
 
 
-def construir_nf_base_from_nf_na_nf(nf_na_nf_regs: List[Dict]) -> Dict[str, Dict]:
+def get_kw_base_nf(nf1: str, combos: List[Dict]) -> Optional[float]:
     """
-    Constrói mapa:
-      nf -> cenário base (apenas NF1 aberta, sem NA e sem NF_block)
-    a partir da tabela nf_na_nf.
+    Encontra o cenário base (apenas NF1, sem NA e sem NF_block)
+    para recuperar o impacto da NF isolada.
     """
-    base: Dict[str, Dict] = {}
-    for reg in nf_na_nf_regs:
-        nf1 = reg["nf1"]
-        na = reg["na"]
-        nf_block = reg["nf_block"]
-        if na is None and nf_block is None:
-            # cenário NF isolada
-            if nf1 not in base or reg["kw_off"] < base[nf1]["kw_off"]:
-                base[nf1] = reg
-    return base
+    for reg in combos:
+        if reg["nf1"] == nf1 and reg["na"] is None and reg["nf_block"] is None:
+            return reg["kw_off"]
+    return None
 
 
-def buscar_opcoes_modo2(
+def encontrar_opcoes_modo2(
     trecho_buses: set,
-    nf_na_nf_regs: List[Dict],
+    combos: List[Dict],
+    max_options: int = 5,
 ) -> List[Dict]:
     """
-    Replica a lógica do script de duas fontes usando
-    o banco nf_na_nf:
-
-      1) Encontra NF que isolam o trecho (buses_off da NF sozinha
-         contém todas as barras do trecho).
-      2) Para cada NF candidata:
-         - cenário base (NF1 apenas)
-         - cenários com NA (+ opcional NF_block) que:
-             * mantêm o trecho desenergizado
-             * reduzem a carga desligada (kw_off < kw_off_base_nf1)
-      3) Ordena por:
-           kw_off, n_manobras, kw_off_base_nf1
+    Usa o banco nf_na_nf:
+      - filtra cenários que desligam todas as barras do trecho;
+      - ordena por (kw_off, n_manobras, kw_base_nf).
     """
     if not trecho_buses:
         return []
 
-    nf_base = construir_nf_base_from_nf_na_nf(nf_na_nf_regs)
-    if not nf_base:
-        return []
-
-    # indexar por nf1 para acesso rápido
-    por_nf1: Dict[str, List[Dict]] = {}
-    for reg in nf_na_nf_regs:
-        nf1 = reg["nf1"]
-        por_nf1.setdefault(nf1, []).append(reg)
-
-    opcoes = []
-
-    for nf1, base_reg in nf_base.items():
-        base_buses_off = base_reg["buses_off"]
-        # checa se NF1 sozinha isola o trecho
-        if not trecho_buses.issubset(base_buses_off):
+    valid = []
+    for reg in combos:
+        buses_off = set(reg["buses_off"])
+        if not trecho_buses.issubset(buses_off):
             continue
 
-        kw_off_base = base_reg["kw_off"]
+        kw_base = get_kw_base_nf(reg["nf1"], combos)
+        reg = reg.copy()
+        reg["kw_base_nf1"] = kw_base if kw_base is not None else reg["kw_off"]
+        valid.append(reg)
 
-        # Cenário A: NF1 apenas
-        scen_base = {
-            **base_reg,
-            "kw_off_base_nf": kw_off_base,
-        }
-        opcoes.append(scen_base)
-
-        # Cenários com NA e/ou NF_block
-        for reg in por_nf1.get(nf1, []):
-            if reg is base_reg:
-                continue
-
-            # Mantém trecho desenergizado?
-            if not trecho_buses.issubset(reg["buses_off"]):
-                continue
-
-            # Precisa melhorar em relação à NF apenas
-            if reg["kw_off"] >= kw_off_base:
-                continue
-
-            reg2 = {
-                **reg,
-                "kw_off_base_nf": kw_off_base,
-            }
-            opcoes.append(reg2)
-
-    # ordena e remove duplicatas por (nf1, na, nf_block)
-    opcoes_ordenadas = sorted(
-        opcoes,
-        key=lambda o: (o["kw_off"], o["n_manobras"], o["kw_off_base_nf"]),
+    valid_sorted = sorted(
+        valid,
+        key=lambda r: (r["kw_off"], r["n_manobras"], r["kw_base_nf1"])
     )
 
-    uniq = []
+    # remove duplicatas por (nf1, na, nf_block)
     seen = set()
-    for o in opcoes_ordenadas:
-        key = (o["nf1"], o["na"], o["nf_block"])
+    out = []
+    for reg in valid_sorted:
+        key = (reg["nf1"], reg["na"], reg["nf_block"])
         if key in seen:
             continue
         seen.add(key)
-        uniq.append(o)
+        out.append(reg)
+        if len(out) >= max_options:
+            break
 
-    return uniq
+    return out
 
 
 # =========================================================
-# FUNÇÕES DE PLOT – MAPA BASE E DESTAQUES
+# FUNÇÕES DE PLOT – MAPA BASE + DESTAQUES
 # =========================================================
-def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict]):
+def construir_mapa_base(coords, topo):
     """
-    Retorna uma figura Plotly com a topologia base (sem destaques).
+    Retorna uma figura Plotly com a topologia base (sem destaques),
+    mostrando:
+      - barras com nome;
+      - linhas em cinza;
+      - nomes das linhas em fonte pequena, centralizados em cada segmento.
     """
+    fig = go.Figure()
+
+    # --- Linhas base ---
     edge_x = []
     edge_y = []
 
@@ -510,12 +384,6 @@ def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict]
             edge_x += [x0, x1, None]
             edge_y += [y0, y1, None]
 
-    node_x = [coords[b][0] for b in coords]
-    node_y = [coords[b][1] for b in coords]
-    node_text = list(coords.keys())
-
-    fig = go.Figure()
-
     fig.add_trace(
         go.Scatter(
             x=edge_x,
@@ -526,6 +394,11 @@ def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict]
             name="Linhas",
         )
     )
+
+    # --- Nós (barras) ---
+    node_x = [coords[b][0] for b in coords]
+    node_y = [coords[b][1] for b in coords]
+    node_text = list(coords.keys())
 
     fig.add_trace(
         go.Scatter(
@@ -540,6 +413,51 @@ def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict]
         )
     )
 
+    # --- Rótulos das linhas (nomes das linhas) ---
+    label_x = []
+    label_y = []
+    label_text = []
+
+    for el in topo:
+        ln = el["line"]
+        u = el["from_bus"]
+        v = el["to_bus"]
+        if u not in coords or v not in coords:
+            continue
+
+        x0, y0 = coords[u]
+        x1, y1 = coords[v]
+        xm = (x0 + x1) / 2
+        ym = (y0 + y1) / 2
+
+        dx = x1 - x0
+        dy = y1 - y0
+
+        # desloca um pouco o texto para não sobrepor a barra
+        if abs(dx) >= abs(dy):
+            # linha mais horizontal -> desloca um pouco no eixo Y
+            ym = ym + 10
+        else:
+            # linha mais vertical -> desloca um pouco no eixo X
+            xm = xm + 10
+
+        label_x.append(xm)
+        label_y.append(ym)
+        label_text.append(ln)
+
+    fig.add_trace(
+        go.Scatter(
+            x=label_x,
+            y=label_y,
+            mode="text",
+            text=label_text,
+            textposition="middle center",
+            textfont=dict(size=8, color="gray"),
+            showlegend=False,
+            hoverinfo="none",
+        )
+    )
+
     fig.update_layout(
         height=600,
         showlegend=True,
@@ -551,54 +469,6 @@ def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict]
     return fig
 
 
-def adicionar_rotulos_de_linhas(
-    fig: go.Figure,
-    coords: Dict[str, Tuple[float, float]],
-    topo_por_line: Dict[str, Dict],
-    linhas: List[str],
-    cor_texto: str = "black",
-    nome_traco: str = "Linhas",
-):
-    """
-    Adiciona rótulos com o nome das linhas no ponto médio de cada uma,
-    com fonte pequena e levemente acima (para não ficar sobreposto).
-    """
-    xs = []
-    ys = []
-    texts = []
-
-    for ln in sorted(set(linhas)):
-        el = topo_por_line.get(ln)
-        if not el:
-            continue
-        u = el["from_bus"]
-        v = el["to_bus"]
-        if u not in coords or v not in coords:
-            continue
-        x0, y0 = coords[u]
-        x1, y1 = coords[v]
-        xm = (x0 + x1) / 2.0
-        ym = (y0 + y1) / 2.0
-        xs.append(xm)
-        ys.append(ym)
-        texts.append(ln)
-
-    if xs:
-        fig.add_trace(
-            go.Scatter(
-                x=xs,
-                y=ys,
-                mode="text",
-                text=texts,
-                textposition="top center",
-                textfont=dict(color=cor_texto, size=9),
-                showlegend=False,
-                name=nome_traco,
-                hoverinfo="skip",
-            )
-        )
-
-
 def plotar_mapa_modo1(
     coords,
     topo,
@@ -606,38 +476,29 @@ def plotar_mapa_modo1(
     info_vaos: List[Dict],
 ):
     """
-    MODO 1:
-      - vãos selecionados (linhas pretas grossas)
-      - NFs associadas em vermelho (tracejado)
-      - rótulos de linhas (vãos + NFs)
+    Mapa para o MODO 1:
+      - vãos selecionados em preto;
+      - NFs associadas em vermelho tracejado;
+      - rótulos de linhas e barras do mapa base.
     """
     fig = construir_mapa_base(coords, topo)
-    topo_por_line = {el["line"]: el for el in topo}
 
-    # --- Destaque dos vãos (linhas pretas) ---
-    edge_x = []
-    edge_y = []
-    linhas_vaos = []
+    # --- Destaque dos vãos selecionados ---
+    destaque_edge_x = []
+    destaque_edge_y = []
 
     for u, v in vaos:
-        # tentar achar linha correspondente (se existir)
-        for ln, el in topo_por_line.items():
-            if (el["from_bus"] == u and el["to_bus"] == v) or (
-                el["from_bus"] == v and el["to_bus"] == u
-            ):
-                linhas_vaos.append(ln)
-                if u in coords and v in coords:
-                    x0, y0 = coords[u]
-                    x1, y1 = coords[v]
-                    edge_x += [x0, x1, None]
-                    edge_y += [y0, y1, None]
-                break
+        if u in coords and v in coords:
+            x0, y0 = coords[u]
+            x1, y1 = coords[v]
+            destaque_edge_x += [x0, x1, None]
+            destaque_edge_y += [y0, y1, None]
 
-    if edge_x:
+    if destaque_edge_x:
         fig.add_trace(
             go.Scatter(
-                x=edge_x,
-                y=edge_y,
+                x=destaque_edge_x,
+                y=destaque_edge_y,
                 mode="lines",
                 line=dict(color="black", width=4),
                 name="Trecho selecionado (vãos)",
@@ -645,24 +506,29 @@ def plotar_mapa_modo1(
             )
         )
 
-    # --- Destaque das NFs ---
+    topo_por_line = {el["line"]: el for el in topo}
+
+    # --- Destaque das NF associadas ---
     nf_edges_x = []
     nf_edges_y = []
-    nf_labels_lines = []
+    nf_labels_x = []
+    nf_labels_y = []
+    nf_labels_text = []
 
     for info in info_vaos:
         nf = info["nf"]
-        el = topo_por_line.get(nf)
-        if not el:
-            continue
-        u = el["from_bus"]
-        v = el["to_bus"]
-        if u in coords and v in coords:
-            x0, y0 = coords[u]
-            x1, y1 = coords[v]
-            nf_edges_x += [x0, x1, None]
-            nf_edges_y += [y0, y1, None]
-            nf_labels_lines.append(nf)
+        if nf in topo_por_line:
+            el = topo_por_line[nf]
+            u = el["from_bus"]
+            v = el["to_bus"]
+            if u in coords and v in coords:
+                x0, y0 = coords[u]
+                x1, y1 = coords[v]
+                nf_edges_x += [x0, x1, None]
+                nf_edges_y += [y0, y1, None]
+                nf_labels_x.append((x0 + x1) / 2)
+                nf_labels_y.append((y0 + y1) / 2)
+                nf_labels_text.append(nf)
 
     if nf_edges_x:
         fig.add_trace(
@@ -676,16 +542,18 @@ def plotar_mapa_modo1(
             )
         )
 
-    # --- Rótulos de linhas (vãos + NFs) ---
-    linhas_para_rotulo = set(linhas_vaos) | set(nf_labels_lines)
-    adicionar_rotulos_de_linhas(
-        fig,
-        coords,
-        topo_por_line,
-        list(linhas_para_rotulo),
-        cor_texto="black",
-        nome_traco="Rótulos de linhas",
-    )
+    if nf_labels_x:
+        fig.add_trace(
+            go.Scatter(
+                x=nf_labels_x,
+                y=nf_labels_y,
+                mode="text",
+                text=nf_labels_text,
+                textposition="middle center",
+                textfont=dict(color="red", size=10),
+                showlegend=False,
+            )
+        )
 
     return fig
 
@@ -693,35 +561,30 @@ def plotar_mapa_modo1(
 def plotar_mapa_modo2(
     coords,
     topo,
-    trecho_linhas: List[str],
-    opcao: Dict,
+    vaos: List[Tuple[str, str]],
+    scenario: Dict,
 ):
     """
-    MODO 2:
-      - Linhas do trecho em preto grosso
-      - NF1 em vermelho
-      - NA em azul
-      - NF_block em laranja
-      - Rótulos de linhas relevantes (trecho + NF1 + NA + NF_block)
+    Mapa para o MODO 2:
+      - vãos do trecho em preto;
+      - NF1 (isoladora) em vermelho;
+      - NA em ciano;
+      - NF_block em laranja;
+      - labels de linhas e barras do mapa base.
     """
     fig = construir_mapa_base(coords, topo)
     topo_por_line = {el["line"]: el for el in topo}
 
-    # ---- Linhas do trecho (preto) ----
+    # --- Trecho (vãos selecionados) ---
     edge_x = []
     edge_y = []
-    for ln in trecho_linhas:
-        el = topo_por_line.get(ln)
-        if not el:
-            continue
-        u = el["from_bus"]
-        v = el["to_bus"]
-        if u not in coords or v not in coords:
-            continue
-        x0, y0 = coords[u]
-        x1, y1 = coords[v]
-        edge_x += [x0, x1, None]
-        edge_y += [y0, y1, None]
+
+    for u, v in vaos:
+        if u in coords and v in coords:
+            x0, y0 = coords[u]
+            x1, y1 = coords[v]
+            edge_x += [x0, x1, None]
+            edge_y += [y0, y1, None]
 
     if edge_x:
         fig.add_trace(
@@ -730,15 +593,13 @@ def plotar_mapa_modo2(
                 y=edge_y,
                 mode="lines",
                 line=dict(color="black", width=4),
-                name="Trecho (linhas selecionadas)",
+                name="Trecho selecionado (linhas)",
                 hoverinfo="none",
             )
         )
 
-    # ---- NF1 (vermelho) ----
-    nf1 = opcao["nf1"]
-    nf1_x = []
-    nf1_y = []
+    # --- NF1 ---
+    nf1 = scenario["nf1"]
     if nf1 in topo_por_line:
         el = topo_por_line[nf1]
         u = el["from_bus"]
@@ -746,25 +607,19 @@ def plotar_mapa_modo2(
         if u in coords and v in coords:
             x0, y0 = coords[u]
             x1, y1 = coords[v]
-            nf1_x += [x0, x1, None]
-            nf1_y += [y0, y1, None]
-
-    if nf1_x:
-        fig.add_trace(
-            go.Scatter(
-                x=nf1_x,
-                y=nf1_y,
-                mode="lines",
-                line=dict(color="red", width=4),
-                name=f"NF isoladora ({nf1})",
-                hoverinfo="none",
+            fig.add_trace(
+                go.Scatter(
+                    x=[x0, x1],
+                    y=[y0, y1],
+                    mode="lines",
+                    line=dict(color="red", width=4),
+                    name=f"NF1 (isoladora): {nf1}",
+                    hoverinfo="none",
+                )
             )
-        )
 
-    # ---- NA (azul) ----
-    na = opcao["na"]
-    na_x = []
-    na_y = []
+    # --- NA ---
+    na = scenario["na"]
     if na and na in topo_por_line:
         el = topo_por_line[na]
         u = el["from_bus"]
@@ -772,25 +627,19 @@ def plotar_mapa_modo2(
         if u in coords and v in coords:
             x0, y0 = coords[u]
             x1, y1 = coords[v]
-            na_x += [x0, x1, None]
-            na_y += [y0, y1, None]
-
-    if na_x:
-        fig.add_trace(
-            go.Scatter(
-                x=na_x,
-                y=na_y,
-                mode="lines",
-                line=dict(color="blue", width=4, dash="dot"),
-                name=f"NA restabelecimento ({na})",
-                hoverinfo="none",
+            fig.add_trace(
+                go.Scatter(
+                    x=[x0, x1],
+                    y=[y0, y1],
+                    mode="lines",
+                    line=dict(color="cyan", width=4, dash="dot"),
+                    name=f"NA (restabelecimento): {na}",
+                    hoverinfo="none",
+                )
             )
-        )
 
-    # ---- NF bloqueio (laranja) ----
-    nf_block = opcao["nf_block"]
-    nb_x = []
-    nb_y = []
+    # --- NF_block ---
+    nf_block = scenario["nf_block"]
     if nf_block and nf_block in topo_por_line:
         el = topo_por_line[nf_block]
         u = el["from_bus"]
@@ -798,37 +647,16 @@ def plotar_mapa_modo2(
         if u in coords and v in coords:
             x0, y0 = coords[u]
             x1, y1 = coords[v]
-            nb_x += [x0, x1, None]
-            nb_y += [y0, y1, None]
-
-    if nb_x:
-        fig.add_trace(
-            go.Scatter(
-                x=nb_x,
-                y=nb_y,
-                mode="lines",
-                line=dict(color="orange", width=4, dash="dash"),
-                name=f"NF bloqueio ({nf_block})",
-                hoverinfo="none",
+            fig.add_trace(
+                go.Scatter(
+                    x=[x0, x1],
+                    y=[y0, y1],
+                    mode="lines",
+                    line=dict(color="orange", width=4, dash="dash"),
+                    name=f"NF bloqueio: {nf_block}",
+                    hoverinfo="none",
+                )
             )
-        )
-
-    # ---- Rótulos de linhas (trecho + NF1 + NA + NF_block) ----
-    linhas_rotulo = set(trecho_linhas)
-    linhas_rotulo.add(nf1)
-    if na:
-        linhas_rotulo.add(na)
-    if nf_block:
-        linhas_rotulo.add(nf_block)
-
-    adicionar_rotulos_de_linhas(
-        fig,
-        coords,
-        topo_por_line,
-        list(linhas_rotulo),
-        cor_texto="black",
-        nome_traco="Rótulos de linhas (M2)",
-    )
 
     return fig
 
@@ -836,16 +664,16 @@ def plotar_mapa_modo2(
 # =========================================================
 # CARREGAMENTO DO BANCO E STATUS
 # =========================================================
-st.sidebar.header("📂 Dados carregados")
+st.sidebar.header("📂 Banco de dados")
 
 if not DB_PATH.exists():
-    st.sidebar.error("Banco ieee123_isolamento.db não encontrado na pasta do app.")
+    st.sidebar.error(f"Banco `{DB_PATH.name}` não encontrado na pasta do app.")
     st.stop()
 
 tabelas = listar_tabelas()
 st.sidebar.write("Banco:", f"`{DB_PATH.name}`")
-st.sidebar.write("TOPOLOGY:", "✅" if "topology" in tabelas else "❌")
 st.sidebar.write("COORDS:", "✅" if "coords" in tabelas else "❌")
+st.sidebar.write("TOPOLOGY:", "✅" if "topology" in tabelas else "❌")
 st.sidebar.write("LOADS:", "✅" if "loads" in tabelas else "❌")
 st.sidebar.write("VAO_MAP:", "✅" if "vao_map" in tabelas else "❌")
 st.sidebar.write("NF_MAP:", "✅" if "nf_map" in tabelas else "❌")
@@ -853,335 +681,403 @@ st.sidebar.write("NF_NA_NF:", "✅" if "nf_na_nf" in tabelas else "❌")
 
 coords = carregar_coords()
 topo = carregar_topologia()
-vao_map = carregar_vao_map()
 loads = carregar_loads()
-nf_map_data = carregar_nf_map()
-nf_na_nf_regs = carregar_nf_na_nf()
+vao_map = carregar_vao_map() if "vao_map" in tabelas else []
+nf_map_data = carregar_nf_map() if "nf_map" in tabelas else {}
+nf_na_nf_data = carregar_nf_na_nf() if "nf_na_nf" in tabelas else []
 
 if not coords or not topo:
-    st.error("Banco encontrado, mas alguma tabela essencial está vazia.")
+    st.error("Banco encontrado, mas `coords` ou `topology` estão vazios.")
     st.stop()
 
-# =========================================================
-# CAMPO: NOME DO OPERADOR
-# =========================================================
-st.sidebar.markdown("---")
+# Campo para nome do operador (para aparecer nos relatórios)
+st.sidebar.subheader("👨‍💼 Operador")
 nome_operador = st.sidebar.text_input(
-    "👤 Nome do operador (para relatório):",
+    "Nome do operador:",
     value="",
-    help="Este nome aparecerá nos relatórios exibidos na tela.",
+    help="Esse nome será exibido nos relatórios de manobra."
 )
 
 
 # =========================================================
-# DESCRIÇÃO GERAL
+# DESCRIÇÃO RÁPIDA
 # =========================================================
 st.markdown(
     """
-Ferramenta de apoio à manobra de **desligamento programado** em redes de distribuição,
+Ferramenta de apoio à **manobra de desligamento programado** em redes de distribuição,
 baseada no alimentador teste **IEEE-123 Bus**.
 
-Toda a inteligência de manobra foi calculada anteriormente em
-**OpenDSS + Python (Colab)** e gravada em um banco **SQLite** (`ieee123_isolamento.db`).
+Toda a inteligência (impacto de chaves NF, combinações NF–NA–NF, barras/linhas desenergizadas,
+tensões e carregamento máximo) foi calculada previamente em **OpenDSS + Python (Colab)**
+e armazenada em um banco **SQLite** único (`ieee123_manobras.db`).
 
 A plataforma possui dois modos:
 
-- 🟢 **MODO 1 – Fonte Única**: melhor NF para isolar vãos (U–V) com banco `vao_map` / `nf_map`  
-- 🟣 **MODO 2 – Duas Fontes**: melhor combinação **NF–NA–NF** com base no banco `nf_na_nf`
+- 🟢 **Modo 1 – Fonte única:** usa as tabelas `vao_map` e `nf_map`  
+- 🟣 **Modo 2 – Duas fontes (NF–NA–NF):** usa a tabela `nf_na_nf`  
 """
 )
 
 st.markdown("---")
 
+
 # =========================================================
-# MAPA BASE
+# MAPA BASE ESTÁTICO
 # =========================================================
-st.subheader("🗺️ Mapa Base da Rede (IEEE-123 Bus)")
+st.subheader("🗺️ Mapa Base da Rede (IEEE-123 Bus) – Barras + Linhas (com nomes)")
 fig_base = construir_mapa_base(coords, topo)
 st.plotly_chart(fig_base, use_container_width=True)
 
 st.markdown("---")
 
-# =========================================================
-# MODO 1 – FONTE ÚNICA
-# =========================================================
-st.header("🟢 MODO 1 – Isolamento com Fonte Única (NF por Vão)")
 
-if nome_operador:
-    st.markdown(f"**Operador:** `{nome_operador}`")
-
-lista_barras = sorted(
-    coords.keys(),
-    key=lambda x: (x.isdigit(), int(x) if x.isdigit() else x),
+# =========================================================
+# SELEÇÃO DE MODO
+# =========================================================
+tab_modo1, tab_modo2 = st.tabs(
+    ["🟢 Modo 1 – Fonte única", "🟣 Modo 2 – Duas fontes"]
 )
 
-# --------- VÃO SIMPLES ---------
-st.subheader("🔧 Vão simples (U–V)")
 
-col_u, col_v = st.columns(2)
-with col_u:
-    u_simples = st.selectbox("Barra U", lista_barras, key="u_simples")
-with col_v:
-    v_simples = st.selectbox("Barra V", lista_barras, key="v_simples")
+# =========================================================
+# MODO 1 – FONTE ÚNICA (VAO_MAP + NF_MAP)
+# =========================================================
+with tab_modo1:
+    st.markdown("### 🟢 Modo 1 – Fonte única (NF ótima por vão)")
 
-if st.button("Confirmar vão simples (Modo 1)"):
-    vao_simples = (u_simples, v_simples)
-    info = buscar_nf_para_vao(u_simples, v_simples, vao_map)
-
-    st.subheader("🔎 Resultado – Vão simples (Modo 1)")
-
-    if info is None:
-        st.error(f"Não há NF cadastrada no banco para o vão {u_simples} – {v_simples}.")
+    if not vao_map or not nf_map_data:
+        st.warning(
+            "Tabelas `vao_map` e/ou `nf_map` não disponíveis no banco. "
+            "Modo 1 indisponível."
+        )
     else:
-        st.success(
-            f"**Operador:** `{nome_operador or 'N/D'}`  \n"
-            f"**Vão:** `{u_simples} – {v_simples}`  \n"
-            f"**Melhor NF:** `{info['nf']}`  |  "
-            f"**Carga interrompida (NF isolada):** {info['kw']:.1f} kW  |  "
-            f"**Barras isoladas:** {info['n_barras']}"
+        st.sidebar.subheader("🔧 Modo 1 – Vão simples (U–V)")
+        lista_barras = sorted(
+            coords.keys(),
+            key=lambda x: (x.isdigit(), int(x) if x.isdigit() else x),
         )
 
-        fig_vao = plotar_mapo_modo1 := plotar_mapa_modo1(
-            coords,
-            topo,
-            vaos=[vao_simples],
-            info_vaos=[info],
+        u_simples = st.sidebar.selectbox(
+            "Barra U (Modo 1)", lista_barras, key="u_simples_m1"
         )
-        st.plotly_chart(fig_vao, use_container_width=True)
-
-        st.markdown("**Sequência de manobra sugerida (Modo 1):**")
-        st.markdown(
-            f"1️⃣ Abrir NF **{info['nf']}** para isolar o vão **{u_simples} – {v_simples}**.  \n"
-            f"✅ Demais chaves permanecem no estado nominal."
+        v_simples = st.sidebar.selectbox(
+            "Barra V (Modo 1)", lista_barras, key="v_simples_m1"
         )
 
-    st.markdown("---")
+        if st.sidebar.button("Confirmar vão simples (Modo 1)"):
+            vao_simples = (u_simples, v_simples)
+            info = buscar_nf_para_vao(u_simples, v_simples, vao_map)
 
-# --------- TRECHO MULTI-VÃOS ---------
-st.subheader("🧩 Trecho com múltiplos vãos (entrada em blocos de 2 barras) – MODO 1")
+            st.subheader("🔎 Resultado – Vão simples (Modo 1)")
 
-entrada_seq = st.text_input(
-    "Sequência de barras (ex: 60,62,63,64,65,66,60,67)",
-    value="60,62,63,64,65,66,60,67",
-)
+            if nome_operador:
+                st.info(f"Operador responsável: **{nome_operador}**")
 
-if st.button("Processar trecho (MODO 1 – multi-vãos)"):
-    barras_raw = [b.strip() for b in entrada_seq.split(",") if b.strip()]
-    if len(barras_raw) < 2:
-        st.error("Informe pelo menos duas barras.")
-    else:
-        vaos = identificar_vaos_blocos(barras_raw)
-
-        if not vaos:
-            st.error("Nenhum vão pôde ser formado com a sequência informada.")
-        else:
-            st.markdown("### 🔍 Vãos identificados (blocos de 2 barras):")
-            st.write(vaos)
-
-            info_vaos = []
-            nao_encontrados = []
-
-            for u, v in vaos:
-                info = buscar_nf_para_vao(u, v, vao_map)
-                if info is None:
-                    nao_encontrados.append((u, v))
-                else:
-                    info_vaos.append(
-                        dict(
-                            u=u,
-                            v=v,
-                            nf=info["nf"],
-                            kw=info["kw"],
-                            n_barras=info["n_barras"],
-                        )
-                    )
-
-            if nao_encontrados:
-                st.warning(
-                    "Não foram encontrados registros para os seguintes vãos: "
-                    + ", ".join([f"{u}-{v}" for u, v in nao_encontrados])
+            if info is None:
+                st.error(
+                    f"Não há NF cadastrada no banco para o vão {u_simples} – {v_simples}."
+                )
+            else:
+                st.success(
+                    f"**Melhor NF:** `{info['nf']}`  |  "
+                    f"**Carga interrompida (NF isolada):** {info['kw']:.1f} kW  |  "
+                    f"**Barras isoladas:** {info['n_barras']}"
                 )
 
-            if info_vaos:
-                st.markdown("### ✅ NF de manobra por vão (impacto individual – MODO 1)")
-
-                df_data = [
-                    {
-                        "Vão (U-V)": f"{d['u']} - {d['v']}",
-                        "NF ótima": d["nf"],
-                        "kW interrompidos (NF isolada)": d["kw"],
-                        "Barras isoladas (NF isolada)": d["n_barras"],
-                    }
-                    for d in info_vaos
-                ]
-                st.table(df_data)
-
-                fig_multi = plotar_mapa_modo1(
+                fig_vao = plotar_mapa_modo1(
                     coords,
                     topo,
-                    vaos=[(d["u"], d["v"]) for d in info_vaos],
-                    info_vaos=info_vaos,
+                    vaos=[vao_simples],
+                    info_vaos=[info],
                 )
-                st.markdown("### 🗺️ Mapa com trecho e NFs destacadas (MODO 1)")
-                st.plotly_chart(fig_multi, use_container_width=True)
+                st.plotly_chart(fig_vao, use_container_width=True)
 
-                st.markdown("### ⚡ Impacto consolidado da manobra (sem dupla contagem – MODO 1)")
-                lista_nf_ordenada: List[str] = []
-                for d in info_vaos:
-                    if d["nf"] not in lista_nf_ordenada:
-                        lista_nf_ordenada.append(d["nf"])
-
-                if not nf_map_data:
-                    st.warning(
-                        "Tabela `nf_map` não está disponível no banco. "
-                        "Não foi possível calcular o impacto consolidado."
-                    )
-                else:
-                    kw_total, n_barras_unicas, barras_ordenadas = impacto_consolidado(
-                        lista_nf_ordenada, loads, nf_map_data
-                    )
-                    st.success(
-                        f"**Operador:** `{nome_operador or 'N/D'}`  \n"
-                        f"**Carga total interrompida:** {kw_total:.1f} kW  \n"
-                        f"**Barras desenergizadas únicas:** {n_barras_unicas}"
-                    )
-                    with st.expander("Ver barras desenergizadas únicas"):
-                        st.write(barras_ordenadas)
-
-                st.markdown("### 📜 Linha de tempo de manobra (MODO 1)")
-
-                for i, nf in enumerate(lista_nf_ordenada, start=1):
-                    vaos_nf = [
-                        f"{d['u']}-{d['v']}" for d in info_vaos if d["nf"] == nf
-                    ]
-                    st.markdown(
-                        f"{i}️⃣ Abrir NF **{nf}** para isolar os vãos: "
-                        + ", ".join(vaos_nf)
-                    )
-
+                st.markdown("**Sequência de manobra sugerida:**")
                 st.markdown(
-                    "✅ Após conclusão da manutenção, **fechar as NFs na ordem inversa**, "
-                    "conforme os procedimentos operacionais da distribuidora."
+                    f"1️⃣ Abrir NF **{info['nf']}** para isolar o vão **{u_simples} – {v_simples}**.  \n"
+                    f"✅ Demais chaves permanecem no estado nominal."
                 )
 
-st.markdown("---")
+            st.markdown("---")
+
+        # --------- TRECHO MULTI-VÃOS ---------
+        st.markdown("### 🧩 Trecho com múltiplos vãos (entrada em blocos de 2 barras)")
+
+        entrada_seq = st.text_input(
+            "Sequência de barras (ex: 60,62,63,64,65,66,60,67) – Modo 1",
+            value="60,62,63,64,65,66,60,67",
+        )
+
+        if st.button("Processar Trecho (Multi-Vãos) – Modo 1"):
+            barras_raw = [b.strip() for b in entrada_seq.split(",") if b.strip()]
+            if len(barras_raw) < 2:
+                st.error("Informe pelo menos duas barras.")
+            else:
+                vaos = identificar_vaos_blocos(barras_raw)
+
+                if not vaos:
+                    st.error("Nenhum vão pôde ser formado com a sequência informada.")
+                else:
+                    st.markdown("### 🔍 Vãos identificados (blocos de 2 barras):")
+                    st.write(vaos)
+
+                    info_vaos = []
+                    nao_encontrados = []
+
+                    for u, v in vaos:
+                        info = buscar_nf_para_vao(u, v, vao_map)
+                        if info is None:
+                            nao_encontrados.append((u, v))
+                        else:
+                            info_vaos.append(
+                                dict(
+                                    u=u,
+                                    v=v,
+                                    nf=info["nf"],
+                                    kw=info["kw"],
+                                    n_barras=info["n_barras"],
+                                )
+                            )
+
+                    if nome_operador:
+                        st.info(f"Operador responsável: **{nome_operador}**")
+
+                    if nao_encontrados:
+                        st.warning(
+                            "Não foram encontrados registros para os seguintes vãos: "
+                            + ", ".join([f"{u}-{v}" for u, v in nao_encontrados])
+                        )
+
+                    if info_vaos:
+                        st.markdown("### ✅ NF de manobra por vão (impacto individual)")
+
+                        df_data = [
+                            {
+                                "Vão (U-V)": f"{d['u']} - {d['v']}",
+                                "NF ótima": d["nf"],
+                                "kW interrompidos (NF isolada)": d["kw"],
+                                "Barras isoladas (NF isolada)": d["n_barras"],
+                            }
+                            for d in info_vaos
+                        ]
+                        st.table(df_data)
+
+                        fig_multi = plotar_mapa_modo1(
+                            coords,
+                            topo,
+                            vaos=[(d["u"], d["v"]) for d in info_vaos],
+                            info_vaos=info_vaos,
+                        )
+                        st.markdown("### 🗺️ Mapa com trecho e NFs destacadas")
+                        st.plotly_chart(fig_multi, use_container_width=True)
+
+                        # Impacto consolidado
+                        st.markdown(
+                            "### ⚡ Impacto consolidado da manobra (sem dupla contagem)"
+                        )
+
+                        lista_nf_ordenada: List[str] = []
+                        for d in info_vaos:
+                            if d["nf"] not in lista_nf_ordenada:
+                                lista_nf_ordenada.append(d["nf"])
+
+                        if not nf_map_data:
+                            st.warning(
+                                "Tabela `nf_map` não está disponível no banco. "
+                                "Não foi possível calcular o impacto consolidado."
+                            )
+                        else:
+                            kw_total, n_barras_unicas, barras_ordenadas = impacto_consolidado(
+                                lista_nf_ordenada, loads, nf_map_data
+                            )
+
+                            st.success(
+                                f"**Carga total interrompida:** {kw_total:.1f} kW  \n"
+                                f"**Barras desenergizadas únicas:** {n_barras_unicas}"
+                            )
+
+                            with st.expander("Ver barras desenergizadas únicas"):
+                                st.write(barras_ordenadas)
+
+                        st.markdown("### 📜 Linha de tempo de manobra (sequência sugerida)")
+                        for i, nf in enumerate(lista_nf_ordenada, start=1):
+                            vaos_nf = [
+                                f"{d['u']}-{d['v']}"
+                                for d in info_vaos
+                                if d["nf"] == nf
+                            ]
+                            st.markdown(
+                                f"{i}️⃣ Abrir NF **{nf}** para isolar os vãos: "
+                                + ", ".join(vaos_nf)
+                            )
+
+                        st.markdown(
+                            "✅ Após conclusão da manutenção, **fechar as NFs na ordem inversa**, "
+                            "conforme os procedimentos operacionais da distribuidora."
+                        )
+
 
 # =========================================================
 # MODO 2 – DUAS FONTES (NF–NA–NF)
 # =========================================================
-st.header("🟣 MODO 2 – Manutenção com Duas Fontes (NF–NA–NF via banco)")
+with tab_modo2:
+    st.markdown("### 🟣 Modo 2 – Duas fontes (combinações NF–NA–NF)")
 
-if nome_operador:
-    st.markdown(f"**Operador:** `{nome_operador}`")
+    if not nf_na_nf_data:
+        st.warning(
+            "Tabela `nf_na_nf` não disponível no banco. "
+            "Modo 2 indisponível."
+        )
+    else:
+        st.markdown(
+            """
+No **Modo 2**, o banco `nf_na_nf` armazena o resultado de todas as combinações
+de chaves **NF–NA–NF**, incluindo:
 
-if not nf_na_nf_regs:
-    st.warning(
-        "Tabela `nf_na_nf` não encontrada ou vazia. "
-        "O MODO 2 depende desse banco pré-calculado."
-    )
-else:
-    st.markdown(
-        """
-**Entrada do MODO 2 é feita por LINHAS** do trecho a ser desligado.
-
-A plataforma procura, no banco `nf_na_nf`, as combinações **NF–NA–NF** que:
-
-- isolam todas as barras do trecho (todas as barras do trecho ∈ `buses_off`), e  
-- reduzem a carga interrompida em relação à NF isoladora sozinha, quando há NA envolvida.
+- barras desligadas (`buses_off`)  
+- linhas desligadas (`lines_off`)  
+- carga total interrompida (`kw_off`)  
+- tensão mínima/máxima (`vmin_pu`, `vmax_pu`)  
+- carregamento máximo (`max_loading`)  
+- número de manobras (`n_manobras`)  
+- estados das chaves (`switch_states`)  
 """
-    )
+        )
 
-    # Lista de linhas "normais" para facilitar (pode incluir tudo, se preferir)
-    linhas_disponiveis = sorted(
-        {el["line"] for el in topo if not el["is_switch"]},
-        key=lambda x: (x.startswith("l"), x),
-    )
+        st.markdown("#### 🎯 Entrada do trecho (por linhas Lxx, swx, l108...)")
+        exemplo_txt = "L70"  # exemplo simples
+        linhas_input = st.text_input(
+            "Linhas do trecho (ex: L70 ou L70,L71):",
+            value=exemplo_txt,
+            help="Use nomes de linhas exatamente como no mapa (Lxx, swx, l108, etc.).",
+        )
 
-    trecho_linhas_sel = st.multiselect(
-        "Selecione as LINHAS do trecho de manutenção (MODO 2):",
-        options=linhas_disponiveis,
-    )
+        if st.button("Processar trecho – Modo 2"):
+            # Normaliza nomes de linhas
+            linhas_trecho = [
+                ln.strip() for ln in linhas_input.split(",") if ln.strip()
+            ]
 
-    if st.button("Buscar opções de manobra (MODO 2 – NF–NA–NF)"):
-        if not trecho_linhas_sel:
-            st.error("Selecione pelo menos uma linha para o trecho.")
-        else:
-            trecho_buses, vaos_m2 = montar_trecho_buses_de_linhas(
-                topo, trecho_linhas_sel
-            )
-
-            st.markdown(
-                f"**Trecho (barras) considerado (MODO 2):** `{sorted(trecho_buses)}`"
-            )
-
-            opcoes = buscar_opcoes_modo2(
-                trecho_buses=trecho_buses,
-                nf_na_nf_regs=nf_na_nf_regs,
-            )
-
-            if not opcoes:
-                st.error(
-                    "❌ Nenhuma combinação NF–NA–NF encontrada no banco que isole "
-                    "esse trecho com as condições pré-calculadas."
-                )
+            if not linhas_trecho:
+                st.error("Informe pelo menos uma linha.")
             else:
-                st.markdown("### ✅ TOP opções de manobra (ordenadas por menor carga desligada – MODO 2)")
-                top3 = opcoes[:3]
+                # Determina conjunto de barras do trecho e vãos para plot
+                trecho_buses, vaos_m2 = trecho_barras_por_linhas(
+                    linhas_trecho, topo
+                )
 
-                tabela_top3 = [
-                    {
-                        "Opção": i,
-                        "NF isoladora": opt["nf1"],
-                        "NA restabelecimento": opt["na"] or "-",
-                        "NF bloqueio": opt["nf_block"] or "-",
-                        "Carga desligada [kW]": f"{opt['kw_off']:.1f}",
-                        "Nº manobras": opt["n_manobras"],
-                        "Impacto NF isoladora (kW)": f"{opt['kw_off_base_nf']:.1f}",
-                        "Vmin_pu": f"{opt['vmin_pu']:.3f}",
-                        "Vmax_pu": f"{opt['vmax_pu']:.3f}",
-                        "Max loading (pu)": f"{opt['max_loading']:.3f}",
-                    }
-                    for i, opt in enumerate(top3, start=1)
-                ]
-                st.table(tabela_top3)
+                if not trecho_buses:
+                    st.error(
+                        "Nenhuma linha informada foi encontrada na tabela de topologia."
+                    )
+                else:
+                    st.markdown("#### 🔍 Trecho considerado (Modo 2)")
+                    st.write(f"**Linhas do trecho:** {linhas_trecho}")
+                    st.write(f"**Barras do trecho:** {sorted(trecho_buses)}")
 
-                if len(opcoes) > 3:
-                    with st.expander("Ver TODAS as opções válidas (MODO 2)"):
-                        tabela_all = [
-                            {
-                                "Opção": i,
-                                "NF isoladora": opt["nf1"],
-                                "NA restabelecimento": opt["na"] or "-",
-                                "NF bloqueio": opt["nf_block"] or "-",
-                                "Carga desligada [kW]": f"{opt['kw_off']:.1f}",
-                                "Nº manobras": opt["n_manobras"],
-                                "Impacto NF isoladora (kW)": f"{opt['kw_off_base_nf']:.1f}",
-                                "Vmin_pu": f"{opt['vmin_pu']:.3f}",
-                                "Vmax_pu": f"{opt['vmax_pu']:.3f}",
-                                "Max loading (pu)": f"{opt['max_loading']:.3f}",
-                            }
-                            for i, opt in enumerate(opcoes, start=1)
-                        ]
-                        st.table(tabela_all)
+                    if nome_operador:
+                        st.info(f"Operador responsável: **{nome_operador}**")
 
-                st.markdown("### 📜 Relatório resumido (MODO 2)")
-                for i, opt in enumerate(top3, start=1):
-                    st.markdown(
-                        f"**Opção {i} – Operador `{nome_operador or 'N/D'}`**  \n"
-                        f"- NF isoladora: **{opt['nf1']}**  \n"
-                        f"- NA de restabelecimento: **{opt['na'] or '-'}**  \n"
-                        f"- NF de bloqueio: **{opt['nf_block'] or '-'}**  \n"
-                        f"- Carga desligada: **{opt['kw_off']:.1f} kW**  \n"
-                        f"- Nº de manobras: **{opt['n_manobras']}**  \n"
-                        f"- Impacto NF isoladora (sem NA): **{opt['kw_off_base_nf']:.1f} kW**  \n"
-                        f"- Vmin/Vmax (pu): **{opt['vmin_pu']:.3f} / {opt['vmax_pu']:.3f}**  \n"
-                        f"- Carregamento máximo (pu): **{opt['max_loading']:.3f}**"
+                    # Busca opções no banco nf_na_nf
+                    opcoes = encontrar_opcoes_modo2(
+                        trecho_buses, nf_na_nf_data, max_options=5
                     )
 
-                    fig_op = plotar_mapa_modo2(
-                        coords,
-                        topo,
-                        trecho_linhas_sel,
-                        opt,
-                    )
-                    st.plotly_chart(fig_op, use_container_width=True)
+                    if not opcoes:
+                        st.error(
+                            "Nenhuma combinação NF–NA–NF encontrada que desligue "
+                            "exatamente todas as barras do trecho informado."
+                        )
+                    else:
+                        st.markdown(
+                            "### ✅ TOP opções de manobra (ordenadas por menor carga desligada)"
+                        )
+
+                        # Tabela resumida
+                        tabela_opcoes = []
+                        for i, opt in enumerate(opcoes, start=1):
+                            tabela_opcoes.append(
+                                {
+                                    "Opção": i,
+                                    "NF isoladora": opt["nf1"],
+                                    "NA restabelecimento": opt["na"] or "-",
+                                    "NF bloqueio": opt["nf_block"] or "-",
+                                    "Carga desligada [kW]": opt["kw_off"],
+                                    "Nº manobras": opt["n_manobras"],
+                                    "Vmin [pu]": opt["vmin_pu"],
+                                    "Vmax [pu]": opt["vmax_pu"],
+                                    "Carregamento máx. [pu]": opt["max_loading"],
+                                    "Impacto NF isoladora (kW)": opt["kw_base_nf1"],
+                                }
+                            )
+
+                        st.table(tabela_opcoes)
+
+                        # Escolha de uma opção para detalhar
+                        idx_escolha = st.number_input(
+                            "Escolha o número da opção para detalhar (1, 2, 3, ...):",
+                            min_value=1,
+                            max_value=len(opcoes),
+                            value=1,
+                            step=1,
+                        )
+                        opt_sel = opcoes[idx_escolha - 1]
+
+                        st.markdown("### 📜 Detalhamento da opção escolhida")
+
+                        st.write(
+                            f"- **NF isoladora:** `{opt_sel['nf1']}`  \n"
+                            f"- **NA restabelecimento:** `{opt_sel['na'] or '-'}`  \n"
+                            f"- **NF bloqueio:** `{opt_sel['nf_block'] or '-'}`  \n"
+                            f"- **Carga desligada:** `{opt_sel['kw_off']:.2f} kW`  \n"
+                            f"- **Nº manobras:** `{opt_sel['n_manobras']}`  \n"
+                            f"- **Impacto NF isoladora (sem NA):** `{opt_sel['kw_base_nf1']:.2f} kW`  \n"
+                            f"- **Vmin / Vmax [pu]:** `{opt_sel['vmin_pu']:.3f} / {opt_sel['vmax_pu']:.3f}`  \n"
+                            f"- **Carregamento máximo [pu]:** `{opt_sel['max_loading']:.3f}`  \n"
+                        )
+
+                        if nome_operador:
+                            st.write(f"👤 **Operador:** {nome_operador}")
+
+                        # Mapa da opção
+                        st.markdown("### 🗺️ Mapa da opção escolhida (NF–NA–NF)")
+                        fig_m2 = plotar_mapa_modo2(
+                            coords,
+                            topo,
+                            vaos_m2,
+                            opt_sel,
+                        )
+                        st.plotly_chart(fig_m2, use_container_width=True)
+
+                        # Listagem de barras e linhas desligadas
+                        st.markdown("#### 📌 Barras desenergizadas no cenário:")
+                        st.write(sorted(set(opt_sel["buses_off"])))
+
+                        st.markdown("#### 📌 Linhas desligadas no cenário:")
+                        st.write(sorted(set(opt_sel["lines_off"])))
+
+                        # Linha do tempo simplificada
+                        st.markdown("### ⏱️ Linha de tempo de manobra – Modo 2")
+                        st.markdown(
+                            f"1️⃣ Abrir NF isoladora **{opt_sel['nf1']}** para iniciar o isolamento do trecho."
+                        )
+                        if opt_sel["na"]:
+                            st.markdown(
+                                f"2️⃣ Fechar NA **{opt_sel['na']}** para restabelecer o maior número possível de cargas."
+                            )
+                            if opt_sel["nf_block"]:
+                                st.markdown(
+                                    f"3️⃣ Abrir NF de bloqueio **{opt_sel['nf_block']}** "
+                                    "para evitar dupla alimentação em trechos da rede."
+                                )
+                        elif opt_sel["nf_block"]:
+                            # Caso raro: NF_block sem NA
+                            st.markdown(
+                                f"2️⃣ Abrir NF de bloqueio **{opt_sel['nf_block']}** "
+                                "para garantir seletividade da manobra."
+                            )
+
+                        st.markdown(
+                            "✅ Após conclusão da manutenção, **retornar as chaves ao estado nominal**, "
+                            "conforme procedimento operacional da distribuidora."
+                        )
