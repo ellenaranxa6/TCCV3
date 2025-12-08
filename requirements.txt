@@ -5,3 +5,5 @@ numpy
 typing_extensions
 networkx
 streamlit-plotly-events
+sqlite-utils
+python-dotenv
