@@ -826,15 +826,6 @@ def run_modo2():
             fig_opt = plotar_mapa_m2(coords, topo, trecho_buses, opt)
             st.plotly_chart(fig_opt, use_container_width=True)
 
-        st.markdown("### 📜 Interpretação (Modo 2)")
-        st.markdown(
-            "- NF1 é sempre a chave **NF** responsável por isolar o trecho.\n"
-            "- A NA é fechada **apenas** se reduzir a carga desligada em relação à NF isoladora.\n"
-            "- NF_bloq é aberta somente quando necessária para evitar **dupla alimentação**.\n"
-            "- Toda a lógica foi pré-calculada via **OpenDSS + Python** e gravada na tabela `nf_na_nf`."
-        )
-
-
 # =========================================================
 # ========================= MAIN ==========================
 # =========================================================
