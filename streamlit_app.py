@@ -1008,3 +1008,109 @@ with tab2:
                 st.markdown(
                     f"📄 *Resumo da manobra (Modo 2) – opção {opcao_det} – Usuário: {nome_operador}*"
                 )
+                st.subheader("📄 Gerar Relatório em PDF")
+
+if st.button("📥 Download do Relatório PDF"):
+    buffer = gerar_relatorio_pdf(
+        operador=nome_operador,
+        trecho_barras=trecho_barras,
+        opcao=opt_sel,
+        barras_desligadas=opt_sel["buses_off"],
+        nome_arquivo="Relatorio_Manobra.pdf"
+    )
+
+    st.download_button(
+        label="Clique aqui para baixar o relatório",
+        data=buffer,
+        file_name="Relatorio_Manobra.pdf",
+        mime="application/pdf"
+    )
+
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import cm
+from io import BytesIO
+
+def gerar_relatorio_pdf(
+    operador: str,
+    trecho_barras: list,
+    opcao: dict,
+    barras_desligadas: list,
+    nome_arquivo: str = "Relatorio_Manobra.pdf"
+):
+    """
+    Gera um PDF em memória contendo o relatório da manobra.
+    Retorna um objeto BytesIO pronto para download.
+    """
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=letter)
+
+    largura, altura = letter
+    y = altura - 2*cm
+
+    # -----------------------------
+    # Cabeçalho
+    # -----------------------------
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(2*cm, y, "Relatório de Manobra – TopoSwitch IEEE-123")
+    y -= 1.2*cm
+
+    pdf.setFont("Helvetica", 12)
+    pdf.drawString(2*cm, y, f"Operador responsável: {operador}")
+    y -= 0.8*cm
+    pdf.drawString(2*cm, y, f"Trecho analisado (barras): {', '.join(trecho_barras)}")
+    y -= 0.8*cm
+    pdf.drawString(2*cm, y, f"Opção selecionada: NF1={opcao['nf1']} | NA={opcao['na']} | NF bloqueio={opcao['nf_block']}")
+    y -= 1.2*cm
+
+    # -----------------------------
+    # Dados elétricos
+    # -----------------------------
+    pdf.setFont("Helvetica-Bold", 13)
+    pdf.drawString(2*cm, y, "Parâmetros elétricos:")
+    y -= 1.0*cm
+
+    pdf.setFont("Helvetica", 11)
+    pdf.drawString(2*cm, y, f"Carga desligada: {opcao['kw_off']:.2f} kW")
+    y -= 0.6*cm
+    pdf.drawString(2*cm, y, f"Vmin: {opcao['vmin_pu']:.3f} pu   |   Vmax: {opcao['vmax_pu']:.3f} pu")
+    y -= 0.6*cm
+    pdf.drawString(2*cm, y, f"Carregamento máximo: {opcao['max_loading']:.3f} pu")
+    y -= 1.0*cm
+
+    # -----------------------------
+    # Barras desligadas
+    # -----------------------------
+    pdf.setFont("Helvetica-Bold", 13)
+    pdf.drawString(2*cm, y, "Barras desligadas:")
+    y -= 0.9*cm
+
+    pdf.setFont("Helvetica", 10)
+
+    colunas = 3
+    linhas = math.ceil(len(barras_desligadas) / colunas)
+    idx = 0
+
+    for i in range(linhas):
+        linha_txt = ""
+        for j in range(colunas):
+            if idx < len(barras_desligadas):
+                linha_txt += f"{barras_desligadas[idx]:>6}   "
+                idx += 1
+        pdf.drawString(2*cm, y, linha_txt)
+        y -= 0.5*cm
+
+        if y < 3*cm:
+            pdf.showPage()
+            y = altura - 2*cm
+            pdf.setFont("Helvetica", 10)
+
+    # -----------------------------
+    # Finaliza
+    # -----------------------------
+    pdf.showPage()
+    pdf.save()
+    buffer.seek(0)
+    return buffer
+    
