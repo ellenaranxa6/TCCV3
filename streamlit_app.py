@@ -956,21 +956,29 @@ with tab2:
                 st.dataframe(df_opts, use_container_width=True)
 
                 max_op = len(options)
-
-                # Inicializa o estado se não existir
+                
+                # Inicializar estado
                 if "modo2_opcao" not in st.session_state:
                     st.session_state["modo2_opcao"] = 1
-                    
-                opcao_det = st.selectbox(
-                    "Escolha o número da opção para detalhar:",
-                    options=list(range(1, max_op + 1)),
+                
+                def atualizar_opcao():
+                    st.session_state["modo2_opcao"] = st.session_state["modo2_selectbox"]
+                
+                st.markdown("### Escolha a opção para detalhar:")
+                
+                st.selectbox(
+                    "Opção disponível:",
+                    options=[i for i in range(1, max_op + 1)],
                     index=st.session_state["modo2_opcao"] - 1,
-                    key="modo2_opcao_select"
+                    key="modo2_selectbox",
+                    on_change=atualizar_opcao,
                 )
-                    
-                # Armazena o valor escolhido no estado
-                st.session_state["modo2_opcao"] = opcao_det
-                    
+                
+                # Recupera a opção REAL escolhida
+                opcao_det = st.session_state["modo2_opcao"]
+                
+                st.success(f"➡️ Opção selecionada: **{opcao_det}**")
+                
                 idx = opcao_det - 1
                 opt_sel = options[idx]
 
