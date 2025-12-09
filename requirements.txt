@@ -7,3 +7,4 @@ networkx
 streamlit-plotly-events
 sqlite-utils
 python-dotenv
+reportlab
