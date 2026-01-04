@@ -389,6 +389,175 @@ def find_options_modo2(
     return uniq
 
 
+def parse_vanos_modo2(entrada_barras: str) -> List[Tuple[str, str]]:
+    """
+    Converte a entrada do Modo 2 em lista de vãos.
+
+    Regras:
+    - Se vier quantidade PAR: interpreta como blocos (b1,b2)(b3,b4)...
+      Ex: "19,20,101,102" -> [(19,20),(101,102)]
+    - Se vier quantidade ÍMPAR >= 3: interpreta como sequência (b1,b2),(b2,b3)...
+      Ex: "69,70,71" -> [(69,70),(70,71)]
+    - Se vier 2: um vão [(b1,b2)]
+    """
+    raw = [b.strip() for b in entrada_barras.replace(";", ",").split(",") if b.strip()]
+    buses = normalizar_barras(raw)
+
+    if len(buses) < 2:
+        return []
+
+    if len(buses) == 2:
+        return [(buses[0], buses[1])]
+
+    if len(buses) % 2 == 0:
+        vaos = []
+        for i in range(0, len(buses), 2):
+            vaos.append((buses[i], buses[i + 1]))
+        return vaos
+
+    return [(buses[i], buses[i + 1]) for i in range(len(buses) - 1)]
+
+
+def _base_por_nf1(nf_na_nf_rows: List[Dict]) -> Dict[str, Dict]:
+    """
+    Retorna o registro BASE de cada NF1 (apenas NF aberta, sem NA e sem NF_bloq).
+    """
+    base = {}
+    for row in nf_na_nf_rows:
+        if row.get("nf1") and row.get("na") is None and row.get("nf_block") is None:
+            base[str(row["nf1"])] = row
+    return base
+
+
+def _nf_cobre_vao(nf_base_row: Dict, vao: Tuple[str, str]) -> bool:
+    """
+    Um NF cobre um vão (u,v) se, ao abrir somente essa NF, as duas barras do vão estão em buses_off.
+    """
+    u, v = vao
+    buses_off = set(normalizar_barras(nf_base_row.get("buses_off", [])))
+    return (u in buses_off) and (v in buses_off)
+
+
+def escolher_conjunto_nf_por_cobertura(
+    vaos: List[Tuple[str, str]],
+    nf_na_nf_rows: List[Dict],
+) -> Tuple[List[str], Dict[Tuple[str, str], List[str]]]:
+    """
+    Escolhe o menor conjunto de NFs que cobre TODOS os vãos (set cover por brute force).
+
+    Critérios:
+      1) Minimiza número de NFs
+      2) Em empate, minimiza soma do kW BASE das NFs
+      3) Em empate, minimiza soma de n_manobras base (normalmente 1)
+
+    Retorna:
+      - lista_nf_escolhida (ex.: ["sw1"])
+      - cobertura_por_vao: { (u,v): [nfs_que_cobrem] }
+    """
+    base = _base_por_nf1(nf_na_nf_rows)
+    if not base or not vaos:
+        return [], {}
+
+    # NFs que cobrem cada vão
+    cobertura_por_vao: Dict[Tuple[str, str], List[str]] = {}
+    for vao in vaos:
+        candidatos = []
+        for nf1, row in base.items():
+            if _nf_cobre_vao(row, vao):
+                candidatos.append(nf1)
+        cobertura_por_vao[vao] = sorted(candidatos)
+
+    # Se algum vão não tem NF que o isole, falha
+    if any(len(cands) == 0 for cands in cobertura_por_vao.values()):
+        return [], cobertura_por_vao
+
+    nfs = list(base.keys())
+
+    melhor = None  # (k_nfs, soma_kw, soma_manobras, tuple_nfs)
+    melhor_set = None
+
+    import itertools
+    for r in range(1, len(nfs) + 1):
+        if melhor is not None and r > melhor[0]:
+            break
+
+        for comb in itertools.combinations(nfs, r):
+            comb_set = set(comb)
+
+            ok = True
+            for vao, cands in cobertura_por_vao.items():
+                if not (comb_set & set(cands)):
+                    ok = False
+                    break
+            if not ok:
+                continue
+
+            soma_kw = sum(float(base[nf]["kw_off"]) for nf in comb)
+            soma_man = sum(int(base[nf]["n_manobras"]) for nf in comb)
+
+            key = (len(comb), soma_kw, soma_man, tuple(sorted(comb)))
+            if (melhor is None) or (key < melhor):
+                melhor = key
+                melhor_set = list(sorted(comb))
+
+        if melhor_set is not None:
+            break
+
+    return (melhor_set or []), cobertura_por_vao
+
+
+def find_options_modo2_multi(
+    entrada_barras: str,
+    nf_na_nf_rows: List[Dict],
+) -> Dict:
+    """
+    Nova entrada do Modo 2:
+    - interpreta múltiplos vãos
+    - escolhe conjunto mínimo de NFs que cobre todos os vãos
+    - se o conjunto tiver 1 NF -> usa find_options_modo2 normal
+    """
+    vaos = parse_vanos_modo2(entrada_barras)
+
+    trecho_barras = []
+    for u, v in vaos:
+        trecho_barras.extend([u, v])
+    trecho_barras = normalizar_barras(trecho_barras)
+
+    nf_escolhidas, cobertura_por_vao = escolher_conjunto_nf_por_cobertura(vaos, nf_na_nf_rows)
+
+    if not nf_escolhidas:
+        return dict(
+            vaos=vaos,
+            nf_isoladoras=[],
+            trecho_barras=trecho_barras,
+            options=[],
+            cobertura_por_vao=cobertura_por_vao,
+        )
+
+    if len(nf_escolhidas) == 1:
+        options = find_options_modo2(trecho_barras, nf_na_nf_rows)
+
+        nf1 = nf_escolhidas[0]
+        options = [o for o in options if o.get("nf1") == nf1]
+
+        return dict(
+            vaos=vaos,
+            nf_isoladoras=nf_escolhidas,
+            trecho_barras=trecho_barras,
+            options=options,
+            cobertura_por_vao=cobertura_por_vao,
+        )
+
+    # Multi-NF: a tabela nf_na_nf não modela múltiplas NFs simultâneas.
+    return dict(
+        vaos=vaos,
+        nf_isoladoras=nf_escolhidas,
+        trecho_barras=trecho_barras,
+        options=[],
+        cobertura_por_vao=cobertura_por_vao,
+    )
+
+
 # =========================================================
 # PLOT – MAPA BASE + RÓTULO DAS LINHAS
 # =========================================================
@@ -916,95 +1085,123 @@ with tab2:
         st.markdown("### 🎯 Trecho alvo (barras) – Modo 2")
 
         entrada_barras_m2 = st.text_input(
-            "Lista de barras do trecho a desenergizar (ex: 69,70 ou 69,70,71)",
+            "Lista de barras do trecho a desenergizar (ex: 69,70 ou 69,70,71 ou 19,20,101,102)",
             value="69,70",
             key="modo2_barras",
         )
 
         if st.button("Buscar opções de manobra (Modo 2)", key="btn_modo2_buscar"):
-            barras_raw = [b.strip() for b in entrada_barras_m2.split(",") if b.strip()]
-            trecho_barras = normalizar_barras(barras_raw)
+
+            resultado = find_options_modo2_multi(entrada_barras_m2, nf_na_nf_rows)
+
+            vaos = resultado["vaos"]
+            trecho_barras = resultado["trecho_barras"]
+            nf_isoladoras = resultado["nf_isoladoras"]
+            options = resultado["options"]
+            cobertura_por_vao = resultado["cobertura_por_vao"]
 
             st.write(f"Trecho considerado (barras): {trecho_barras}")
 
-            options = find_options_modo2(trecho_barras, nf_na_nf_rows)
+            if vaos:
+                st.markdown("**Vãos interpretados:**")
+                for u, v in vaos:
+                    st.write(f"- ({u}, {v})")
+
+            if not nf_isoladoras:
+                st.error("Não foi possível encontrar NFs que isolem todos os vãos informados.")
+                with st.expander("Diagnóstico de cobertura por vão"):
+                    for vao, cands in cobertura_por_vao.items():
+                        st.write(f"{vao}: {cands if cands else 'SEM NF no banco'}")
+                st.stop()
+
+            st.success(f"NF(s) isoladora(s) selecionada(s) por cobertura: **{', '.join(nf_isoladoras)}**")
+
+            if len(nf_isoladoras) > 1:
+                st.warning(
+                    "⚠️ Este banco `nf_na_nf` possui cenários para **uma NF isoladora por vez**.\n\n"
+                    "Para esse conjunto de vãos, foi necessário mais de uma NF isoladora. "
+                    "A recomendação de isolamento (quais NFs abrir) está correta, mas os cenários NF–NA–NF "
+                    "com as NFs simultâneas não estão pré-calculados no banco."
+                )
+                with st.expander("Diagnóstico: NFs candidatas por vão"):
+                    for vao, cands in cobertura_por_vao.items():
+                        st.write(f"{vao}: {cands}")
+                st.stop()
 
             if not options:
-                st.error("Nenhum cenário de manobra encontrado que desligue exatamente esse trecho.")
-            else:
-                import pandas as pd
+                st.error("Nenhum cenário de manobra encontrado que desligue esse trecho com a NF escolhida.")
+                st.stop()
 
-                df_opts = pd.DataFrame(
-                    [
-                        dict(
-                            Opção=i,
-                            NF_isoladora=row["nf1"],
-                            NA=row["na"] or "•",
-                            NF_bloqueio=row["nf_block"] or "•",
-                            Carga_desligada_kW=row["kw_off"],
-                            N_manobras=row["n_manobras"],
-                            Vmin_pu=row["vmin_pu"],
-                            Vmax_pu=row["vmax_pu"],
-                            Carregamento_max_pu=row["max_loading"],
-                            Impacto_NF_isoladora_kW=row["kw_off_base_nf"],
-                        )
-                        for i, row in enumerate(options, start=1)
-                    ]
-                )
+            import pandas as pd
 
-                st.markdown("### ✅ TOP opções de manobra (ordenadas por menor carga desligada)")
-                st.dataframe(df_opts, use_container_width=True)
+            df_opts = pd.DataFrame(
+                [
+                    dict(
+                        Opção=i,
+                        NF_isoladora=row["nf1"],
+                        NA=row["na"] or "•",
+                        NF_bloqueio=row["nf_block"] or "•",
+                        Carga_desligada_kW=row["kw_off"],
+                        N_manobras=row["n_manobras"],
+                        Vmin_pu=row["vmin_pu"],
+                        Vmax_pu=row["vmax_pu"],
+                        Carregamento_max_pu=row["max_loading"],
+                        Impacto_NF_isoladora_kW=row["kw_off_base_nf"],
+                    )
+                    for i, row in enumerate(options, start=1)
+                ]
+            )
 
-                max_op = len(options)
-                
-                # Inicializar estado
-                if "modo2_opcao" not in st.session_state:
-                    st.session_state["modo2_opcao"] = 1
-                
-                def atualizar_opcao():
-                    st.session_state["modo2_opcao"] = st.session_state["modo2_selectbox"]
-                
-                st.markdown("### Escolha a opção para detalhar:")
-                
-                st.selectbox(
-                    "Opção disponível:",
-                    options=[i for i in range(1, max_op + 1)],
-                    index=st.session_state["modo2_opcao"] - 1,
-                    key="modo2_selectbox",
-                    on_change=atualizar_opcao,
-                )
-                
-                # Recupera a opção REAL escolhida
-                opcao_det = st.session_state["modo2_opcao"]
-                
-                st.success(f"➡️ Opção selecionada: **{opcao_det}**")
-                
-                idx = opcao_det - 1
-                opt_sel = options[idx]
+            st.markdown("### ✅ TOP opções de manobra (ordenadas por menor carga desligada)")
+            st.dataframe(df_opts, use_container_width=True)
 
-                st.markdown(f"#### 🔍 Detalhamento da opção {opcao_det}")
+            max_op = len(options)
 
-                st.write(
-                    f"- **NF isoladora (NF1):** `{opt_sel['nf1']}`  \n"
-                    f"- **NA de restabelecimento:** `{opt_sel['na'] or '-'}`  \n"
-                    f"- **NF de bloqueio:** `{opt_sel['nf_block'] or '-'}`  \n"
-                    f"- **Carga desligada:** `{opt_sel['kw_off']:.4f} kW`  \n"
-                    f"- **Nº de manobras:** `{opt_sel['n_manobras']}`  \n"
-                    f"- **Vmin/Vmax [pu]:** `{opt_sel['vmin_pu']:.4f} / {opt_sel['vmax_pu']:.4f}`  \n"
-                    f"- **Carregamento máximo [pu]:** `{opt_sel['max_loading']:.4f}`  \n"
-                    f"- **Impacto NF isoladora (NF1 sozinha):** `{opt_sel['kw_off_base_nf']:.4f} kW`  \n"
-                    f"- **Usuário:** `{nome_operador}`"
-                )
+            # Inicializar estado
+            if "modo2_opcao" not in st.session_state:
+                st.session_state["modo2_opcao"] = 1
 
-                st.markdown("#### 🗺️ Mapa da manobra (Modo 2)")
-                fig_m2 = plotar_mapa_modo2(coords, topo, trecho_barras, opt_sel)
-                st.plotly_chart(fig_m2, use_container_width=True)
+            def atualizar_opcao():
+                st.session_state["modo2_opcao"] = st.session_state["modo2_selectbox"]
 
-                # Exibir listas de barras/linhas desligadas
-                with st.expander("Ver barras desligadas e linhas desligadas da opção selecionada"):
-                    st.write("**Barras desligadas:**", normalizar_barras(opt_sel.get("buses_off", [])))
-                    st.write("**Linhas desligadas:**", normalizar_barras(opt_sel.get("lines_off", [])))
+            st.markdown("### Escolha a opção para detalhar:")
 
-                st.markdown(
-                    f"📄 *Resumo da manobra (Modo 2) – opção {opcao_det} – Usuário: {nome_operador}*"
-                )
+            st.selectbox(
+                "Opção disponível:",
+                options=[i for i in range(1, max_op + 1)],
+                index=st.session_state["modo2_opcao"] - 1,
+                key="modo2_selectbox",
+                on_change=atualizar_opcao,
+            )
+
+            opcao_det = st.session_state["modo2_opcao"]
+            st.success(f"➡️ Opção selecionada: **{opcao_det}**")
+
+            idx = opcao_det - 1
+            opt_sel = options[idx]
+
+            st.markdown(f"#### 🔍 Detalhamento da opção {opcao_det}")
+
+            st.write(
+                f"- **NF isoladora (NF1):** `{opt_sel['nf1']}`  \n"
+                f"- **NA de restabelecimento:** `{opt_sel['na'] or '-'}`  \n"
+                f"- **NF de bloqueio:** `{opt_sel['nf_block'] or '-'}`  \n"
+                f"- **Carga desligada:** `{opt_sel['kw_off']:.4f} kW`  \n"
+                f"- **Nº de manobras:** `{opt_sel['n_manobras']}`  \n"
+                f"- **Vmin/Vmax [pu]:** `{opt_sel['vmin_pu']:.4f} / {opt_sel['vmax_pu']:.4f}`  \n"
+                f"- **Carregamento máximo [pu]:** `{opt_sel['max_loading']:.4f}`  \n"
+                f"- **Impacto NF isoladora (NF1 sozinha):** `{opt_sel['kw_off_base_nf']:.4f} kW`  \n"
+                f"- **Usuário:** `{nome_operador}`"
+            )
+
+            st.markdown("#### 🗺️ Mapa da manobra (Modo 2)")
+            fig_m2 = plotar_mapa_modo2(coords, topo, trecho_barras, opt_sel)
+            st.plotly_chart(fig_m2, use_container_width=True)
+
+            with st.expander("Ver barras desligadas e linhas desligadas da opção selecionada"):
+                st.write("**Barras desligadas:**", normalizar_barras(opt_sel.get("buses_off", [])))
+                st.write("**Linhas desligadas:**", normalizar_barras(opt_sel.get("lines_off", [])))
+
+            st.markdown(
+                f"📄 *Resumo da manobra (Modo 2) – opção {opcao_det} – Usuário: {nome_operador}*"
+            )
